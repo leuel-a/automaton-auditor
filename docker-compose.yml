@@ -1,0 +1,26 @@
+services:
+  auditor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PYTHON_VERSION: 3.12
+    container_name: auditor
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NODE_VERSION: 20.19.2
+    container_name: auditor-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - auditor
+    environment:
+      - NEXT_PUBLIC_API_URL=http://backend:8000
+    restart: unless-stopped
