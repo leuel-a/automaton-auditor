@@ -2,17 +2,36 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Dict, List, Optional
+from collections import defaultdict
+from typing import Any, DefaultDict, Dict, List, Optional, cast
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from src.llm_provider import GenericLLMProvider
 from src.prompts.prompt_family import PromptFamily
 from src.state import AgentState
+from src.tools.doc_tools import (
+    cross_reference,
+    markdown_read,
+    pdf_parse_ingest_pdf,
+    pdf_parse_query_pdf,
+)
 from src.tools.repo_tools import ast_parse, file_read, git_clone, git_log
 
-tools = [git_clone, git_log, file_read, ast_parse]
+tools = [
+    git_clone,
+    git_log,
+    file_read,
+    ast_parse,
+    cross_reference,
+    markdown_read,
+    pdf_parse_ingest_pdf,
+    pdf_parse_query_pdf,
+]
 TOOL_MAP = {tool.name: tool for tool in tools}
+
+model = GenericLLMProvider.from_provider(os.getenv("LLM_PROVIDER", "gemini"))
+model_with_tools = model.bind_tools(tools)
 
 
 def _github_repo_dimensions(state: AgentState) -> List[Dict]:
@@ -25,8 +44,6 @@ def _github_repo_dimensions(state: AgentState) -> List[Dict]:
 
 
 def repo_investigator(state: AgentState) -> AgentState:
-    model = GenericLLMProvider.from_provider(os.getenv("LLM_PROVIDER", "gemini"))
-    model_with_tools = model.bind_tools(tools)
 
     # COMPILE MASTER PROMPT ONCE (CACHE IN STATE)
     get_dimensions_prompt: Optional[str] = state.get("repo_dimensions_prompt")
@@ -108,7 +125,9 @@ def repo_tools(state: AgentState) -> AgentState:
         except Exception as e:
             result = f"ERROR: {type(e).__name__}: {e}"
 
-        messages.append(ToolMessage(content=str(result), tool_call_id=tool_call.get("id")))
+        messages.append(
+            ToolMessage(content=str(result), tool_call_id=tool_call.get("id"))
+        )
 
     out_state = {**state, "repo_investigator_messages": messages}
     if repo_path:
@@ -117,8 +136,129 @@ def repo_tools(state: AgentState) -> AgentState:
     return out_state
 
 
-def doc_analyst(state: AgentState):
-    pass
+def _group_evidences(raw: Any) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Convert either:
+      - list[Evidence] where each item has evidence_class
+      - dict[str, list[Evidence]] already grouped
+    into dict[str, list[Evidence]] for state["evidences"] (operator.ior friendly).
+    """
+    if raw is None:
+        return {}
+
+    # Already grouped
+    if isinstance(raw, dict):
+        return raw  # assume correct shape
+
+    grouped: DefaultDict[str, List[Dict[str, Any]]] = defaultdict(list)
+    if isinstance(raw, list):
+        for ev in raw:
+            if isinstance(ev, dict):
+                cls = ev.get("evidence_class") or ev.get("class") or "Unclassified"
+                grouped[str(cls)].append(ev)
+            else:
+                grouped["Unclassified"].append({"raw": ev})
+    else:
+        grouped["Unclassified"].append({"raw": raw})
+
+    return dict(grouped)
+
+
+def _safe_json_load(s: str) -> Dict[str, Any]:
+    try:
+        return json.loads(s)
+    except Exception:
+        # If the model accidentally returns extra text, attempt to salvage the first JSON object.
+        start = s.find("{")
+        end = s.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return json.loads(s[start : end + 1])
+        raise
+
+
+def doc_analyst(state: AgentState) -> Dict[str, Any]:
+    master_prompt = state.get("doc_dimensions_prompt")
+    if not master_prompt:
+        raise ValueError(
+            "Missing doc_dimensions_prompt in state. Compile it from rubric_dimensions first."
+        )
+
+    # Persist messages across tool loops (same idea as repo_investigator_messages)
+    msgs = state.get("doc_analyst_messages") or []
+    if not msgs:
+        msgs = [
+            SystemMessage(content=PromptFamily.doc_analyst_system_prompt()),
+            HumanMessage(
+                content=json.dumps(
+                    {
+                        "repo_url": state["repo_url"],
+                        "repo_path": state.get("repo_path"),
+                        "pdf_path": state["pdf_path"],
+                        "pdf_doc_id": state.get("pdf_doc_id"),
+                        "master_prompt": master_prompt,
+                    },
+                    ensure_ascii=False,
+                )
+            ),
+        ]
+
+    # Bind doc tools and invoke
+    ai_message: AIMessage = model.invoke(msgs)
+
+    updates: Dict[str, Any] = {"doc_analyst_messages": [ai_message]}
+
+    # If no tool calls, we expect final JSON output
+    tool_calls = getattr(ai_message, "tool_calls", None)
+    if not tool_calls:
+        content = ai_message.content or ""
+        data = _safe_json_load(cast(str, content))
+
+        # persist pdf_doc_id if present
+        pdf_doc_id = data.get("pdf_doc_id") or data.get("doc_id")
+        if pdf_doc_id:
+            updates["pdf_doc_id"] = str(pdf_doc_id)
+
+        # merge evidences into state["evidences"]
+        grouped = _group_evidences(data.get("evidences"))
+        if grouped:
+            updates["evidences"] = grouped
+
+    return updates
+
+
+def doc_tools(state: AgentState) -> Dict[str, Any]:
+    messages = state.get("doc_analyst_messages") or []
+    last_message = next(
+        (
+            messages
+            for messages in reversed(messages)
+            if isinstance(messages, AIMessage)
+        ),
+        None,
+    )
+    if not last_message:
+        return {}
+
+    tool_calls = getattr(last_message, "tool_calls", None) or []
+    tool_messages: List[ToolMessage] = []
+
+    for tool_call in tool_calls:
+        name = tool_call.get("name")
+        args = tool_call.get("args") or {}
+        tool_obj = TOOL_MAP.get(name)
+        if tool_obj is None:
+            result = f"Unknown tool: {name}"
+        else:
+            result = tool_obj.invoke(args)
+
+        tool_messages.append(
+            ToolMessage(
+                content=str(result),
+                tool_call_id=tool_call.get("id"),
+            )
+        )
+
+    return {"doc_analyst_messages": tool_messages}
 
 
 def vision_inspector(state: AgentState):

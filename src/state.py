@@ -64,6 +64,10 @@ class AgentState(TypedDict, total=False):
     repo_dimensions_prompt: str
     repo_investigator_messages: Annotated[List[AnyMessage], operator.add]
 
+    doc_dimensions_prompt: str
+    doc_analyst_messages: Annotated[List[AnyMessage], operator.add]
+
+    pdf_doc_id: str  # returned by pdf_parse.ingest_pdf
     rubric_meta_data: RubricMetadata
     rubric_dimensions: List[Dict]
     rubric_synthesis_rules: Dict
