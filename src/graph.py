@@ -5,15 +5,30 @@ from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, StateGraph
 
 from src.nodes import context_builder, doc_analyst, evidence_aggregator
-from src.nodes.detectives import repo_investigator, repo_tools
+from src.nodes.detectives import doc_analyst, doc_tools, repo_investigator, repo_tools
 from src.state import AgentState
 
 
-def _needs_tools(state: AgentState) -> str:
-    msgs = state.get("repo_investigator_messages") or []
-    last_ai = next((m for m in reversed(msgs) if isinstance(m, AIMessage)), None)
-    tool_calls = getattr(last_ai, "tool_calls", None) if last_ai else None
+def _needs_tools_repo_investigator(state: AgentState) -> str:
+    messages = state.get("repo_investigator_messages") or []
+    last_message = next(
+        (message for message in reversed(messages) if isinstance(message, AIMessage)),
+        None,
+    )
+
+    tool_calls = getattr(last_message, "tool_calls", None) if last_message else None
     return "repo_tools" if tool_calls else "evidence_aggregator"
+
+
+def _needs_doc_tools(state: AgentState) -> str:
+    messages = state.get("doc_analyst_messages") or []
+    last_message = next(
+        (message for message in reversed(messages) if isinstance(message, AIMessage)),
+        None,
+    )
+
+    tool_calls = getattr(last_message, "tool_calls", None) if last_message else None
+    return "doc_tools" if tool_calls else "evidence_aggregator"
 
 
 def build_graph():
@@ -29,15 +44,19 @@ def build_graph():
     builder.add_edge("context_builder", "repo_investigator")
     builder.add_edge("context_builder", "doc_analyst")
 
-    # loop without repo_router
     builder.add_conditional_edges(
         "repo_investigator",
-        _needs_tools,
+        _needs_tools_repo_investigator,
         {"repo_tools": "repo_tools", "evidence_aggregator": "evidence_aggregator"},
     )
     builder.add_edge("repo_tools", "repo_investigator")
 
-    builder.add_edge("doc_analyst", "evidence_aggregator")
-    builder.add_edge("evidence_aggregator", END)
+    builder.add_conditional_edges(
+        "doc_analyst",
+        _needs_doc_tools,
+        {"doc_tools": "doc_tools", "evidence_aggregator": "evidence_aggregator"},
+    )
+    builder.add_edge("doc_tools", "doc_analyst")
 
+    builder.add_edge("evidence_aggregator", END)
     return builder.compile()
