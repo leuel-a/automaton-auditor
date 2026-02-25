@@ -9,8 +9,15 @@ import {Card, CardTitle, CardHeader, CardContent} from '@/components/ui/card';
 import {Field, FieldContent, FieldLabel, FieldError, FieldDescription} from '@/components/ui/field';
 
 const auditSchema = z.object({
-    githubUrl: z.url(),
-    reportPdf: z.string(),
+    githubUrl: z.url({ message: 'Github URL must be a valid URL' }),
+    reportPdf: z
+        .instanceof(File, { message: 'Please choose a file' })
+        .refine((file) => file.size <= 5 * 1024 * 1024, {
+            message: 'File must be less than 5MB',
+        })
+        .refine((file) => file.type === 'application/pdf', {
+            message: 'Only PDF files are allowed',
+        }),
 });
 
 type AuditSchemaType = z.infer<typeof auditSchema>;
@@ -20,7 +27,7 @@ export function AuditForm() {
         resolver: zodResolver(auditSchema),
         defaultValues: {
             githubUrl: '',
-            reportPdf: '',
+            reportPdf: undefined,
         },
     });
 
@@ -31,10 +38,11 @@ export function AuditForm() {
     return (
         <Card className="h-fit rounded lg:col-span-3">
             <CardHeader>
-                <CardTitle>Audit Inputs</CardTitle>
+                <CardTitle>Audit</CardTitle>
             </CardHeader>
             <CardContent>
                 <form
+                    noValidate
                     className="space-y-6"
                     onSubmit={form.handleSubmit(handleSubmit)}
                 >
@@ -47,10 +55,12 @@ export function AuditForm() {
                                 <FieldContent>
                                     <Input
                                         {...field}
+                                        type="url"
+                                        aria-invalid={fieldState.invalid}
                                         placeholder="https://github.com/owner/repository"
                                     />
                                 </FieldContent>
-                                {fieldState.invalid ?? <FieldError errors={[fieldState.error]} />}
+                                {fieldState.invalid && <FieldError errors={[fieldState.error]} />}
                             </Field>
                         )}
                     />
@@ -62,8 +72,11 @@ export function AuditForm() {
                                 <FieldLabel>Rubric PDF Report</FieldLabel>
                                 <FieldContent>
                                     <Input
-                                        {...field}
                                         accept="application/pdf"
+                                        aria-invalid={fieldState.invalid}
+                                        className="cursor-pointer"
+                                        onChange={(event) => field.onChange(event.target.files?.[0])}
+                                        type="file"
                                     />
                                     <FieldDescription className="text-muted-foreground text-xs">
                                         Upload the official evaluation rubric PDF.
@@ -74,7 +87,7 @@ export function AuditForm() {
                         )}
                     />
                     <Button
-                        className="my-4 w-full"
+                        className="my-4 w-full cursor-pointer"
                         type="submit"
                     >
                         Run Audit
